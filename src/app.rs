@@ -333,6 +333,12 @@ pub struct App {
     pub local_ready: bool,
     pub local_playback: LocalPlayback,
     pub local: LocalState,
+    companion_generation: u64,
+    companion_capabilities: crate::playback::Capabilities,
+    companion_art: Option<(String, std::sync::Arc<[u8]>)>,
+    companion_art_loaded: Option<String>,
+    media_controls_enabled: bool,
+    media_waker: Waker,
     pub remote: Option<RemoteSnapshot>,
     remote_polled_at: Instant,
     remote_poll_pending: bool,
@@ -744,8 +750,7 @@ impl App {
         };
         let session = SessionState::load(&dirs.session_file());
         let wake = waker.clone();
-        let media_controls = options
-            .media_controls
+        let media_controls = (options.media_controls && !settings.playback_provider.is_session())
             .then(|| MediaControls::start(media_app(), move || wake.wake()));
         #[cfg(target_os = "linux")]
         let system_appearance = {
@@ -837,6 +842,12 @@ impl App {
             local_ready: false,
             local_playback: LocalPlayback::Unavailable,
             local: LocalState::default(),
+            companion_generation: 0,
+            companion_capabilities: crate::playback::Capabilities::default(),
+            companion_art: None,
+            companion_art_loaded: None,
+            media_controls_enabled: options.media_controls,
+            media_waker: waker.clone(),
             remote: None,
             remote_polled_at: Instant::now() - REMOTE_POLL_UNSEEN,
             remote_poll_pending: false,
@@ -1250,7 +1261,64 @@ impl App {
     }
 
     /// Where playback commands go: this computer's player or a remote device.
+    pub fn session_mode(&self) -> bool {
+        self.settings.playback_provider.is_session()
+    }
+
+    pub fn supports_player_command(&self, command: &PlayerCommand) -> bool {
+        !self.session_mode()
+            || (self.local.connected && self.companion_capabilities.supports(command))
+    }
+
+    fn select_playback_provider(&mut self, provider: crate::settings::PlaybackProvider) {
+        self.settings.playback_provider = provider;
+        self.companion_generation = self.companion_generation.wrapping_add(1);
+        self.companion_capabilities = crate::playback::Capabilities::default();
+        self.companion_art = None;
+        self.local = LocalState {
+            volume: self.settings.volume,
+            ..LocalState::default()
+        };
+        self.local_ready = false;
+        self.local_device_id = None;
+        self.local_transfer_sequence = None;
+        self.local_playback = LocalPlayback::Unavailable;
+        self.frame_now = None;
+        self.remote = None;
+        self.remote_poll_pending = false;
+        self.selected_device = None;
+        self.optimistic_playing = None;
+        self.pending_local_position = None;
+        self.seek_preview = None;
+        self.lyrics = Loadable::NotLoaded;
+        self.lyrics_uri = None;
+        self.lyrics_line_shown = None;
+        self.intent_track = None;
+        self.queued_play = None;
+        self.clear_play_pending();
+        self.pending_album_queues.clear();
+        self.pending_queue_adds.clear();
+        self.pending_queue_batches.clear();
+        if self.session_mode() {
+            // Let Spotify own the system media session and media keys. A
+            // second publisher can otherwise dispatch a key twice.
+            self.media_controls = None;
+        } else if self.media_controls_enabled && self.media_controls.is_none() {
+            let wake = self.media_waker.clone();
+            self.media_controls = Some(MediaControls::start(media_app(), move || wake.wake()));
+        }
+        self.backend.send(Command::SetPlaybackProvider {
+            provider,
+            test_controls: self.settings.session_test_controls,
+            generation: self.companion_generation,
+        });
+        self.save_settings();
+    }
+
     pub fn target(&self) -> Target {
+        if self.session_mode() {
+            return Target::Local;
+        }
         if self.local_ready && self.local.is_active() {
             return Target::Local;
         }
@@ -1277,6 +1345,9 @@ impl App {
 
     /// Context shown as playing, including pending local play requests.
     pub fn playing_context_uri(&self) -> Option<String> {
+        if self.session_mode() {
+            return None;
+        }
         let remote = self
             .remote
             .as_ref()
@@ -1386,6 +1457,9 @@ impl App {
 
     /// Current item for menus, using cached track details when available.
     pub fn now_playing_item(&self) -> Option<PlayableItem> {
+        if self.session_mode() {
+            return None;
+        }
         let now = self.now_playing()?;
         if now.is_episode {
             return None;
@@ -1404,6 +1478,9 @@ impl App {
     }
 
     pub fn now_playing(&self) -> Option<NowPlaying> {
+        if self.session_mode() {
+            return self.now_playing_live();
+        }
         if let Some(now) = &self.frame_now {
             return Some(now.clone());
         }
@@ -1413,6 +1490,10 @@ impl App {
     }
 
     fn refresh_frame_now(&mut self) {
+        if self.session_mode() {
+            self.frame_now = self.now_playing_live();
+            return;
+        }
         self.frame_now = self
             .requested_track_preview()
             .or_else(|| self.now_playing_live())
@@ -1497,6 +1578,7 @@ impl App {
                             position
                         }
                     }
+                    _ if self.session_mode() => crate::playback::session::position_now(&self.local),
                     _ => self.local.position_now(),
                 },
                 playing,
@@ -1508,10 +1590,13 @@ impl App {
                 repeat: self.local.repeat,
                 volume_percent: volume_to_percent(self.local.volume),
                 can_control: true,
-                can_set_volume: true,
+                can_set_volume: !self.session_mode(),
                 is_episode: track.is_episode,
                 resuming: false,
             });
+        }
+        if self.session_mode() {
+            return None;
         }
         let remote = self.remote_fresh()?;
         // Ignore a remote snapshot for this device when the local engine has
@@ -1699,6 +1784,10 @@ impl App {
 
     pub fn tint_for(&mut self, url: Option<&str>) -> Option<Color32> {
         let url = url?;
+        if url.starts_with("bytes://") {
+            // The network art loader cannot fetch the companion's local cover.
+            return None;
+        }
         if let Some(color) = self.accents.get(url) {
             return Some(*color);
         }
@@ -1874,6 +1963,9 @@ impl App {
 
     fn handle_backend_events(&mut self, events: Vec<Event>) {
         for event in events {
+            if self.session_mode() && matches!(&event, Event::Local(_) | Event::Playback(_)) {
+                continue;
+            }
             if self.offline
                 && (self.update_source.is_github()
                     || !matches!(
@@ -1929,8 +2021,66 @@ impl App {
                         Err(error) => self.toast_error(format!("{name}: {error}")),
                     }
                 }
+                Event::CompanionUpdate { generation, update } => {
+                    if self.session_mode() && generation == self.companion_generation {
+                        if let Some(error) = &update.state.error
+                            && self.local.error.as_ref() != Some(error)
+                        {
+                            self.toast_error(error.clone());
+                        }
+                        self.local_ready = update.state.connected;
+                        self.local_playback = if update.state.connected {
+                            LocalPlayback::Ready {
+                                device_id: "windows-session".into(),
+                            }
+                        } else {
+                            LocalPlayback::Unavailable
+                        };
+                        self.companion_capabilities = update.capabilities;
+                        self.companion_art = update
+                            .state
+                            .track
+                            .as_ref()
+                            .and_then(|track| track.art_url.clone())
+                            .zip(update.artwork);
+                        if update.state.track_sequence != self.local.track_sequence
+                            || update.state.error.is_some()
+                            || self.pending_local_position.is_some_and(|(position, _)| {
+                                position.abs_diff(update.state.position_ms) < 1_000
+                            })
+                        {
+                            self.pending_local_position = None;
+                        }
+                        self.local = update.state;
+                        self.frame_now = None;
+                        if self.optimistic_playing.is_some_and(|(wanted, _)| {
+                            wanted == (self.local.playback == Playback::Playing)
+                        }) || !self.local.connected
+                            || self.local.error.is_some()
+                        {
+                            self.optimistic_playing = None;
+                        }
+                        self.clear_play_pending();
+                    }
+                }
                 Event::Local(state) => self.handle_local(*state),
-                Event::Api(response) => self.handle_api(*response),
+                Event::Api(response) => {
+                    if self.session_mode()
+                        && matches!(
+                            &*response,
+                            ApiResponse::PlaybackState { .. }
+                                | ApiResponse::Queue { .. }
+                                | ApiResponse::Devices(_)
+                                | ApiResponse::Remote { .. }
+                                | ApiResponse::Transferred { .. }
+                                | ApiResponse::QueueAdded { .. }
+                                | ApiResponse::QueueBatchAdded { .. }
+                        )
+                    {
+                        continue;
+                    }
+                    self.handle_api(*response);
+                }
                 Event::Accent { url, color } => {
                     self.accent_pending.remove(&url);
                     let tint = self.palette.tint_from_art(color);
@@ -2845,6 +2995,11 @@ impl App {
     }
 
     fn on_now_playing_changed(&mut self) {
+        if self.session_mode() {
+            // External metadata has no URI or local queue occurrence. Keep
+            // the original resume point and owed queue for switching back.
+            return;
+        }
         // Queue consumption and saved session state follow confirmed playback,
         // not the song shown optimistically while a command is still pending.
         let Some(now) = self.now_playing_live() else {
@@ -2934,6 +3089,10 @@ impl App {
     /// Asks for the playing track's lyrics unless they are here or on the
     /// way. Podcasts have no lyrics to ask for.
     pub fn request_lyrics(&mut self) {
+        if self.session_mode() {
+            self.lyrics = Loadable::Loaded(None);
+            return;
+        }
         let Some(now) = self.now_playing() else {
             return;
         };
@@ -2976,6 +3135,16 @@ impl App {
     }
 
     fn tick(&mut self, ctx: &egui::Context) {
+        let art_uri = self.companion_art.as_ref().map(|(uri, _)| uri.clone());
+        if self.companion_art_loaded != art_uri {
+            if let Some(old) = self.companion_art_loaded.take() {
+                ctx.forget_image(&old);
+            }
+            if let Some((uri, bytes)) = &self.companion_art {
+                ctx.include_bytes(uri.clone(), bytes.clone());
+            }
+            self.companion_art_loaded = art_uri;
+        }
         self.poll_custom_themes(ctx);
         let now = Instant::now();
         if self.winamp_level_reassert > 0 {
@@ -3172,7 +3341,7 @@ impl App {
     #[cfg(feature = "milkdrop")]
     fn sync_milkdrop(&mut self, ctx: &egui::Context) {
         let presets = self.dirs.milkdrop_dir();
-        let open = self.settings.milkdrop_open;
+        let open = self.settings.milkdrop_open && !self.session_mode();
         let size = self.settings.milkdrop_size;
         let pos = self.milkdrop_pos;
         let fullscreen = self.settings.milkdrop_fullscreen;
@@ -4736,6 +4905,9 @@ impl App {
     }
 
     fn poll_remote(&mut self, _immediate: bool) {
+        if self.session_mode() {
+            return;
+        }
         if !self.is_connected() {
             return;
         }
@@ -4748,6 +4920,9 @@ impl App {
     }
 
     fn refresh_devices(&mut self) {
+        if self.session_mode() {
+            return;
+        }
         if !self.is_connected() || self.devices_loading {
             return;
         }
@@ -4756,6 +4931,9 @@ impl App {
     }
 
     fn refresh_queue(&mut self, force: bool) {
+        if self.session_mode() {
+            return;
+        }
         if !self.is_connected() || !self.network_reachable {
             return;
         }
@@ -4874,6 +5052,9 @@ impl App {
     /// and re-add its songs in the new order, which only reaches the
     /// engine actually playing them.
     pub fn queue_locally_reorderable(&self) -> bool {
+        if self.session_mode() {
+            return false;
+        }
         self.local.is_active() && matches!(self.target(), Target::Local)
     }
 
@@ -4935,6 +5116,9 @@ impl App {
 
     /// Current and upcoming track URIs, deduplicated in playback order.
     pub fn queue_playlist_uris(&self) -> Vec<String> {
+        if self.session_mode() {
+            return Vec::new();
+        }
         let mut seen = std::collections::HashSet::new();
         let mut uris = Vec::new();
         let queued = self.queue.get();
@@ -7431,6 +7615,13 @@ impl App {
     /// in one ordered exchange: two independent requests race, and shuffle
     /// sometimes lost.
     fn play_request(&mut self, request: PlayRequest, shuffle_first: bool) {
+        if self.session_mode() {
+            self.toast_error(
+                "Choose tracks in Spotify. Windows Session controls the existing playback only."
+                    .into(),
+            );
+            return;
+        }
         // Shuffle applies across contexts until disabled. A selected row still
         // starts first; otherwise choose a random starting track.
         let mut request = request;
@@ -7888,6 +8079,19 @@ impl App {
     }
 
     fn toggle_play(&mut self) {
+        if self.session_mode() {
+            if !self.supports_player_command(&PlayerCommand::Toggle) {
+                return;
+            }
+            let playing = self.believed_playing();
+            self.backend.player(if playing {
+                PlayerCommand::Pause
+            } else {
+                PlayerCommand::Resume
+            });
+            self.optimistic_playing = Some((!playing, Instant::now()));
+            return;
+        }
         let playing = self.now_playing().map(|now| now.playing);
         match self.target() {
             Target::Local => {
@@ -7995,6 +8199,9 @@ impl App {
     /// Spotify refuses them for some remote devices, so the controls are
     /// disabled for those rather than failing when used.
     pub fn can_set_volume(&self) -> bool {
+        if self.session_mode() {
+            return false;
+        }
         self.now_playing().is_none_or(|now| now.can_set_volume)
     }
 
@@ -8929,6 +9136,64 @@ impl App {
     }
 
     pub(crate) fn apply(&mut self, action: Action, ctx: &egui::Context) {
+        if matches!(&action, Action::ToggleSaved(uri) if uri.is_empty()) {
+            return;
+        }
+        if self.session_mode() {
+            let command = match &action {
+                Action::Next => Some(PlayerCommand::Next),
+                Action::Previous => Some(PlayerCommand::Previous),
+                Action::Seek(position) => Some(PlayerCommand::Seek(*position)),
+                Action::SeekBy(_) => Some(PlayerCommand::Seek(0)),
+                Action::TogglePlay => Some(PlayerCommand::Toggle),
+                _ => None,
+            };
+            if let Some(command) = command {
+                if !self.supports_player_command(&command) {
+                    self.toast_error("This control is unavailable for the Spotify session. Previous and Seek require the test opt-in in Settings.".into());
+                    return;
+                }
+                match &action {
+                    Action::Next => {
+                        self.backend.player(PlayerCommand::Next);
+                        return;
+                    }
+                    Action::Previous => {
+                        self.backend.player(PlayerCommand::Previous);
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+            if matches!(
+                &action,
+                Action::PlayContext { .. }
+                    | Action::PlayEpisode { .. }
+                    | Action::PlayUris { .. }
+                    | Action::PlayFromRow { .. }
+                    | Action::ShufflePlay(_)
+                    | Action::AddToQueue { .. }
+                    | Action::QueueMany { .. }
+                    | Action::MoveInQueue { .. }
+                    | Action::InsertInQueue { .. }
+                    | Action::ClearQueue
+                    | Action::SaveQueueAsPlaylist
+                    | Action::Transfer(_)
+                    | Action::ActivateReceiver(_)
+                    | Action::SetVolume(_)
+                    | Action::PreviewVolume(_)
+                    | Action::VolumeBy(_)
+                    | Action::ToggleMute
+                    | Action::ToggleShuffle
+                    | Action::CycleRepeat
+                    | Action::SetShuffle(_)
+                    | Action::SetRepeat(_)
+                    | Action::ToggleWinampMilkdrop
+            ) {
+                self.toast_error("Choose songs and adjust the queue, volume or playback mode in Spotify. This companion controls transport only.".into());
+                return;
+            }
+        }
         if matches!(
             &action,
             Action::Open(_)
@@ -8945,6 +9210,11 @@ impl App {
             self.leave_lyrics_fullscreen(ctx);
         }
         match action {
+            Action::SetPlaybackProvider(provider) => self.select_playback_provider(provider),
+            Action::TestSessionControls(enabled) => {
+                self.settings.session_test_controls = enabled;
+                self.select_playback_provider(self.settings.playback_provider);
+            }
             Action::Open(page) => self.open(page),
             Action::OpenSongRadio { uri, track } => self.open_song_radio(&uri, &track),
             Action::PrepareTint(url) => {
@@ -9835,6 +10105,10 @@ impl App {
                 ctx.set_theme(self.theme_preference());
             }
             Action::RestartEngine => {
+                if self.session_mode() {
+                    self.select_playback_provider(self.settings.playback_provider);
+                    return;
+                }
                 self.save_settings();
                 let config = engine_config(
                     &self.dirs,
@@ -9875,6 +10149,10 @@ impl App {
                 }
             }
             Action::EnablePlayback => {
+                if self.session_mode() {
+                    self.select_playback_provider(self.settings.playback_provider);
+                    return;
+                }
                 let free = self
                     .user
                     .as_ref()
@@ -10538,6 +10816,10 @@ impl App {
     ///
     /// Paused time and seeking do not count. Each track is recorded once.
     fn note_listening(&mut self) {
+        if self.session_mode() {
+            self.listening = None;
+            return;
+        }
         let Some(now) = self.now_playing_live() else {
             self.listening = None;
             return;
@@ -10809,7 +11091,7 @@ impl App {
     fn save_session(&mut self) {
         self.session_dirty = false;
         self.last_session_save = Instant::now();
-        if let Some(now) = self.now_playing() {
+        if let Some(now) = self.now_playing().filter(|now| !now.uri.is_empty()) {
             self.resume_context = self.playing_context_uri();
             self.resume_track = Some(now.uri.clone());
             self.resume_position_ms = now.position_ms;
@@ -11053,6 +11335,12 @@ pub fn engine_config(
     eq: crate::eq::SharedEq,
 ) -> EngineConfig {
     EngineConfig {
+        playback_provider: if settings.playback_provider.is_session() {
+            settings.playback_provider
+        } else {
+            crate::settings::PlaybackProvider::Librespot
+        },
+        session_test_controls: settings.session_test_controls,
         tap,
         eq,
         device_name: settings.device_name.trim().to_string(),
@@ -11341,6 +11629,109 @@ mod radio;
 
 #[cfg(test)]
 mod tests {
+    #[cfg(windows)]
+    #[test]
+    fn companion_free_account_uses_transport_without_loading_or_mutating_queue() {
+        let mut app = test_app("companion-free-controls");
+        app.backend.set_offline(true);
+        app.settings.playback_provider = crate::settings::PlaybackProvider::WindowsSession;
+        app.user = Some(User {
+            product: Some("free".into()),
+            ..User::default()
+        });
+        let original_volume = app.settings.volume;
+        app.manual_queue = vec!["spotify:track:owed".into()];
+        app.resume_queue = vec!["spotify:track:resume-owed".into()];
+        app.resume_track = Some("spotify:track:original".into());
+        let state = LocalState {
+            connected: true,
+            playback: Playback::Playing,
+            track: Some(crate::player::LocalTrack {
+                title: "External song".into(),
+                album: "External album".into(),
+                duration_ms: 30_000,
+                ..crate::player::LocalTrack::default()
+            }),
+            ..LocalState::default()
+        };
+        app.handle_backend_events(vec![Event::CompanionUpdate {
+            generation: 0,
+            update: Box::new(crate::playback::session::SessionUpdate {
+                state: state.clone(),
+                capabilities: crate::playback::Capabilities::new([
+                    crate::playback::CommandKind::Next,
+                    crate::playback::CommandKind::Toggle,
+                    crate::playback::CommandKind::Pause,
+                ]),
+                artwork: None,
+            }),
+        }]);
+        let ctx = egui::Context::default();
+        app.apply(
+            Action::PlayUris {
+                uris: vec!["spotify:track:unsupported".into()],
+                index: 0,
+            },
+            &ctx,
+        );
+        app.apply(
+            Action::AddToQueue {
+                uri: "spotify:track:unsupported".into(),
+                label: "Song".into(),
+            },
+            &ctx,
+        );
+        app.apply(Action::SetVolume(15), &ctx);
+        app.apply(Action::Previous, &ctx);
+        app.apply(Action::Seek(500), &ctx);
+        assert!(app.backend.take_player_commands().is_empty());
+        assert_eq!(app.settings.volume, original_volume);
+        assert_eq!(app.local.track, state.track);
+        assert!(app.intent_track.is_none());
+        assert!(app.queued_play.is_none());
+        assert!(app.now_playing().unwrap().uri.is_empty());
+        assert!(!app.can_set_volume());
+        app.apply(Action::Next, &ctx);
+        assert_eq!(app.backend.take_player_commands(), [PlayerCommand::Next]);
+        assert_eq!(app.manual_queue, ["spotify:track:owed"]);
+        app.on_now_playing_changed();
+        assert_eq!(app.resume_queue, ["spotify:track:resume-owed"]);
+        app.save_session();
+        assert_eq!(app.resume_track.as_deref(), Some("spotify:track:original"));
+        app.backend.shutdown();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn companion_generation_and_delayed_reports_preserve_pause_intent() {
+        let mut app = test_app("companion-events");
+        app.backend.set_offline(true);
+        app.settings.playback_provider = crate::settings::PlaybackProvider::WindowsSession;
+        app.companion_generation = 3;
+        app.optimistic_playing = Some((false, Instant::now()));
+        let update = |generation, playback| Event::CompanionUpdate {
+            generation,
+            update: Box::new(crate::playback::session::SessionUpdate {
+                state: LocalState {
+                    connected: true,
+                    playback,
+                    track: Some(crate::player::LocalTrack {
+                        title: "Song".into(),
+                        ..crate::player::LocalTrack::default()
+                    }),
+                    ..LocalState::default()
+                },
+                ..crate::playback::session::SessionUpdate::default()
+            }),
+        };
+        app.handle_backend_events(vec![update(2, Playback::Playing)]);
+        assert!(!app.local.connected);
+        app.handle_backend_events(vec![update(3, Playback::Playing)]);
+        assert!(!app.now_playing().unwrap().playing);
+        app.handle_backend_events(vec![update(3, Playback::Paused)]);
+        assert!(app.optimistic_playing.is_none());
+        app.backend.shutdown();
+    }
     use std::sync::Arc;
 
     use super::*;

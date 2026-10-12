@@ -5956,6 +5956,7 @@ dependencies = [
  "tokio",
  "unicode-bidi",
  "urlencoding",
+ "windows 0.62.2",
  "windows-native-keyring-store",
  "windows-sys 0.60.2",
  "winit",

@@ -26,9 +26,8 @@ use crate::http::Http;
 use crate::images::{ArtLoader, accent_color};
 use crate::model::PlaylistCache;
 use crate::paths::AppDirs;
-use crate::player::{
-    Engine, EngineConfig, EngineEvent, Heard, LocalState, PlaybackResume, PlayerCommand,
-};
+use crate::playback::{LibrespotBackend as Engine, PlaybackBackend};
+use crate::player::{EngineConfig, EngineEvent, Heard, LocalState, PlaybackResume, PlayerCommand};
 use crate::session_reads;
 use crate::settings::ProxyConfig;
 
@@ -579,6 +578,19 @@ struct PlaylistCacheWrite {
 }
 
 pub enum Command {
+    SetPlaybackProvider {
+        provider: crate::settings::PlaybackProvider,
+        test_controls: bool,
+        generation: u64,
+    },
+    CompanionUpdate {
+        generation: u64,
+        update: Box<crate::playback::session::SessionUpdate>,
+    },
+    EngineUpdate {
+        attempt: u64,
+        event: Box<EngineEvent>,
+    },
     OpenThemesFolder,
     ProxyRestored {
         lease: CredentialLease,
@@ -784,6 +796,10 @@ pub struct LyricsRequest {
 }
 
 pub enum Event {
+    CompanionUpdate {
+        generation: u64,
+        update: Box<crate::playback::session::SessionUpdate>,
+    },
     ProxyRestored {
         config: ProxyConfig,
         password: Option<crate::credentials::ProxyPassword>,
@@ -1503,6 +1519,8 @@ impl PlaylistHeaderLookup {
 }
 
 struct Worker {
+    companion: Option<crate::playback::session::WindowsSessionBackend>,
+    companion_generation: u64,
     dirs: AppDirs,
     credentials: CredentialStore,
     web_tokens: [Option<Arc<WebTokens>>; 2],
@@ -1586,6 +1604,8 @@ impl Worker {
         waker: Waker,
     ) -> Self {
         Self {
+            companion: None,
+            companion_generation: 0,
             #[cfg(not(test))]
             credentials: CredentialStore::new(dirs.clone()),
             #[cfg(test)]
@@ -1639,6 +1659,34 @@ impl Worker {
     fn emit(&self, event: Event) {
         let _ = self.events.send(event);
         self.waker.wake();
+    }
+
+    fn stop_companion(&mut self) {
+        if let Some(backend) = self.companion.take() {
+            backend.disconnect();
+        }
+    }
+
+    fn start_companion(&mut self) {
+        self.stop_companion();
+        #[cfg(windows)]
+        {
+            let generation = self.companion_generation;
+            let commands = self.commands.clone();
+            let notify = Arc::new(move |update| {
+                let _ = commands.send(Command::CompanionUpdate {
+                    generation,
+                    update: Box::new(update),
+                });
+            });
+            match crate::playback::session::WindowsSessionBackend::connect(
+                self.engine_config.session_test_controls,
+                notify,
+            ) {
+                Ok(backend) => self.companion = Some(backend),
+                Err(error) => self.emit(Event::Error(error.to_string())),
+            }
+        }
     }
 
     /// Build before replacing either transport configuration. A rejected
@@ -1774,6 +1822,9 @@ impl Worker {
     }
 
     async fn run(&mut self, mut commands: mpsc::UnboundedReceiver<Command>) {
+        if self.engine_config.playback_provider.is_session() {
+            self.start_companion();
+        }
         let (cache_writes, cache_write_receiver) = mpsc::channel(1);
         let cache_writer = tokio::spawn(store_playlist_caches(
             cache_write_receiver,
@@ -1782,9 +1833,13 @@ impl Worker {
         ));
         while let Some(command) = commands.recv().await {
             if self.restoring_proxy
+                && !(self.engine_config.playback_provider.is_session()
+                    && matches!(&command, Command::Player(_)))
                 && !matches!(
                     &command,
                     Command::ProxyRestored { .. }
+                        | Command::SetPlaybackProvider { .. }
+                        | Command::CompanionUpdate { .. }
                         | Command::ApplyProxy { .. }
                         | Command::SignIn { .. }
                         | Command::SignOut
@@ -1796,6 +1851,47 @@ impl Worker {
                 continue;
             }
             match command {
+                Command::SetPlaybackProvider {
+                    provider,
+                    test_controls,
+                    generation,
+                } => {
+                    self.stop_companion();
+                    if self.engine_busy
+                        && let Some(cancel) = self.cancel_signin.take()
+                    {
+                        let _ = cancel.send(true);
+                    }
+                    self.take_engine_for_resume();
+                    self.engine_attempt = self.engine_attempt.wrapping_add(1);
+                    self.engine_busy = false;
+                    self.engine_restart_pending = false;
+                    self.engine_config.playback_provider = provider;
+                    self.engine_config.session_test_controls = test_controls;
+                    self.companion_generation = generation;
+                    if provider.is_session() {
+                        self.start_companion();
+                    } else {
+                        self.resume_engine();
+                    }
+                }
+                Command::CompanionUpdate { generation, update } => {
+                    if self.engine_config.playback_provider.is_session()
+                        && generation == self.companion_generation
+                    {
+                        self.emit(Event::CompanionUpdate { generation, update });
+                    }
+                }
+                Command::EngineUpdate { attempt, event } => {
+                    if attempt == self.engine_attempt
+                        && !self.engine_config.playback_provider.is_session()
+                    {
+                        match *event {
+                            EngineEvent::State(state) => self.emit(Event::Local(Box::new(state))),
+                            EngineEvent::SessionEnded => self.reconnect_engine(),
+                        }
+                    }
+                }
                 Command::OpenThemesFolder => {
                     let directory = self.dirs.config.join("themes");
                     let events = self.events.clone();
@@ -1912,6 +2008,8 @@ impl Worker {
                     // Audio settings must not revert a proxy change whose UI
                     // acknowledgement was still in flight when this was clicked.
                     config.proxy = self.engine_config.proxy.clone();
+                    config.playback_provider = self.engine_config.playback_provider;
+                    config.session_test_controls = self.engine_config.session_test_controls;
                     self.engine_config = config;
                     self.replace_engine();
                 }
@@ -1919,12 +2017,23 @@ impl Worker {
                     self.change_proxy(request, config, false)
                 }
                 Command::Player(command) => {
+                    if self.engine_config.playback_provider.is_session() {
+                        let result = self
+                            .companion
+                            .as_ref()
+                            .ok_or(crate::playback::PlaybackError::Disconnected)
+                            .and_then(|backend| backend.execute(command));
+                        if let Err(error) = result {
+                            self.emit(Event::Error(error.to_string()));
+                        }
+                        continue;
+                    }
                     if matches!(&command, PlayerCommand::Load(_)) {
                         self.resume = None;
                     }
                     match &self.engine {
                         Some(engine) => {
-                            if let Err(error) = engine.command(command) {
+                            if let Err(error) = engine.execute(command) {
                                 self.emit(Event::Error(format!("Playback error: {error}")));
                             }
                         }
@@ -2342,6 +2451,7 @@ impl Worker {
         if let Some(engine) = self.engine.take() {
             engine.shutdown();
         }
+        self.stop_companion();
         drop(cache_writes);
         let _ = cache_writer.await;
     }
@@ -2838,29 +2948,26 @@ impl Worker {
     }
 
     fn engine_notify(&self) -> crate::player::Notify {
-        let events = self.events.clone();
         let commands = self.commands.clone();
-        let waker = self.waker.clone();
+        let attempt = self.engine_attempt;
         let lease = self.credentials.lease(CredentialSlot::Playback);
         Arc::new(move |event| {
             if !lease.current() {
                 return;
             }
-            match event {
-                EngineEvent::State(state) => {
-                    let _ = events.send(Event::Local(Box::new(state)));
-                    waker.wake();
-                }
-                EngineEvent::SessionEnded => {
-                    let _ = commands.send(Command::Reconnect);
-                }
-            }
+            let _ = commands.send(Command::EngineUpdate {
+                attempt,
+                event: Box::new(event),
+            });
         })
     }
 
     /// Bring the engine up from a credential stored by a previous playback
     /// authorization, if there is one. Silent when there is nothing to resume.
     fn resume_engine(&mut self) {
+        if self.engine_config.playback_provider.is_session() {
+            return;
+        }
         if !self.signed_in
             || self.engine.is_some()
             || self.engine_busy
@@ -2896,6 +3003,9 @@ impl Worker {
     /// an HTTP proxy). Does not count toward the drop limiter: flipping a
     /// setting is not the session falling over.
     fn replace_engine(&mut self) {
+        if self.engine_config.playback_provider.is_session() {
+            return;
+        }
         if !self.signed_in {
             return;
         }
@@ -2912,6 +3022,9 @@ impl Worker {
     /// Six drops in ten minutes stop the loop so a flapping session cannot
     /// sit there reconnecting forever.
     fn reconnect_engine(&mut self) {
+        if self.engine_config.playback_provider.is_session() {
+            return;
+        }
         if !self.signed_in {
             return;
         }
@@ -2969,6 +3082,9 @@ impl Worker {
     /// a distinct grant from the Web API sign-in: it uses Spotify's streaming
     /// client identity, the one librespot can play with.
     fn authorize_playback(&mut self) {
+        if self.engine_config.playback_provider.is_session() {
+            return;
+        }
         let http = match self.http.client() {
             Ok(http) => http,
             Err(error) => {
@@ -3042,6 +3158,9 @@ impl Worker {
     /// on "Connecting to Spotify"). Reusable credentials stay in memory until
     /// this worker receives the connected engine and persists them securely.
     fn connect_engine(&mut self, credentials: Credentials) {
+        if self.engine_config.playback_provider.is_session() {
+            return;
+        }
         if let Err(error) = self.http.client() {
             self.pending_playback_grant = None;
             self.emit(Event::Playback(LocalPlayback::Failed(error)));
@@ -3133,7 +3252,10 @@ impl Worker {
         error: Option<String>,
         attempt: u64,
     ) {
-        if !self.signed_in || session_generation != self.album_type_lookup.session_generation {
+        if self.engine_config.playback_provider.is_session()
+            || !self.signed_in
+            || session_generation != self.album_type_lookup.session_generation
+        {
             if let Some(engine) = engine {
                 engine.shutdown();
             }
@@ -6346,6 +6468,36 @@ mod authorization_tests {
             Waker::default(),
         );
         (runtime, worker, events)
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn companion_never_authorizes_or_starts_the_librespot_engine() {
+        let (runtime, mut worker, events) = worker("companion-no-audio");
+        let _entered = runtime.enter();
+        worker.engine_config.playback_provider = crate::settings::PlaybackProvider::WindowsSession;
+        worker.signed_in = true;
+        worker.playback_grant = Some(Credentials::with_password("alice", "fake-grant"));
+        for premium in [false, true] {
+            worker.premium = Some(premium);
+            worker.resume_engine();
+            worker.authorize_playback();
+            worker.connect_engine(Credentials::with_password("alice", "fake-grant"));
+            worker.replace_engine();
+            worker.reconnect_engine();
+        }
+        worker.on_engine_connected(
+            worker.album_type_lookup.session_generation,
+            None,
+            Some("stale librespot failure".into()),
+            worker.engine_attempt,
+        );
+        assert!(worker.engine.is_none());
+        assert!(!worker.engine_busy);
+        assert!(worker.cancel_signin.is_none());
+        assert!(worker.pending_playback_grant.is_none());
+        assert!(worker.reconnects.is_empty());
+        assert!(events.try_iter().next().is_none());
     }
 
     #[test]

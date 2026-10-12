@@ -407,7 +407,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         });
     }
 
-    let (status, detail, action) = match &app.local_playback {
+    let (mut status, mut detail, mut action) = match &app.local_playback {
         crate::backend::LocalPlayback::Ready { .. } => (
             pgettext(locale, "playback status", "Ready"),
             gettext(locale, "This computer is a Spotify Connect device."),
@@ -446,6 +446,21 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         ),
     };
     let playback = gettext(locale, "Playback on this computer");
+    if app.session_mode() {
+        status = if app.local.connected {
+            "Spotify session connected".into()
+        } else {
+            "Waiting for Spotify".into()
+        };
+        detail = app.local.error.clone().unwrap_or_else(|| "Spotify desktop owns the audio. Choose songs and adjust queue/volume in Spotify. No Premium playback grant is needed for this companion.".into()).into();
+        action = Some("Reconnect".into());
+    }
+    let provider_row = RowText::new(
+        "Playback backend",
+        "Librespot or Windows Spotify Session (experimental)",
+    )
+    .when(cfg!(windows));
+    let test_row = RowText::new("Test Previous and Seek", "Unverified with live Spotify. Enable only to test these controls; advertised session flags still apply.").when(app.session_mode());
     let normalize_volume = gettext(locale, "Normalize volume");
     let autoplay = gettext(locale, "Autoplay");
     let gapless = gettext(locale, "Gapless playback");
@@ -537,9 +552,52 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         )
         .when(cfg!(target_os = "macos")),
     ];
-    if section_matches(&needle, &playback, &playback_rows) {
+    if section_matches(&needle, &playback, &playback_rows)
+        || provider_row.matches(&needle, &playback)
+        || test_row.matches(&needle, &playback)
+    {
         any_visible = true;
         section(ui, &palette, &playback, |ui| {
+            filtered_row_sized(
+                ui,
+                &palette,
+                &needle,
+                &playback,
+                &provider_row,
+                285.0,
+                |ui| {
+                    let mut provider = app.settings.playback_provider;
+                    egui::ComboBox::from_id_salt("playback-provider")
+                        .selected_text(if provider.is_session() {
+                            "Windows Spotify Session (experimental)"
+                        } else {
+                            "Librespot"
+                        })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut provider,
+                                crate::settings::PlaybackProvider::Librespot,
+                                "Librespot",
+                            );
+                            ui.selectable_value(
+                                &mut provider,
+                                crate::settings::PlaybackProvider::WindowsSession,
+                                "Windows Spotify Session (experimental)",
+                            );
+                        });
+                    if provider != app.settings.playback_provider {
+                        app.actions.push(Action::SetPlaybackProvider(provider));
+                    }
+                },
+            );
+            if app.session_mode() {
+                filtered_row(ui, &palette, &needle, &playback, &test_row, |ui| {
+                    let mut enabled = app.settings.session_test_controls;
+                    if ui.checkbox(&mut enabled, "Enable test controls").changed() {
+                        app.actions.push(Action::TestSessionControls(enabled));
+                    }
+                });
+            }
             filtered_row(ui, &palette, &needle, &playback, &playback_rows[0], |ui| {
                 if let Some(label) = action {
                     if theme::pill_button(ui, &palette, &label, true).clicked() {

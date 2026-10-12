@@ -6,6 +6,14 @@ nav_order: 1
 
 ## Independent grants, once each
 
+In this independent fork, selecting **Windows Spotify Session (experimental)**
+uses a local Windows media-session companion instead of librespot audio. It
+does not require or start playback authorization; the existing Web API grants
+remain responsible for browsing. No Spotify process or installation is modified.
+See the [Windows companion guide](../windows-companion.md) for unsupported URI,
+queue, volume and session-only catalogue capabilities. The librespot rules
+below remain unchanged when it is selected.
+
 Spotifast uses separate credentials for Web API access, a personal app, and
 local playback:
 

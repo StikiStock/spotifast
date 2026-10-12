@@ -272,7 +272,13 @@ fn rows_visible(height: u32) -> usize {
 /// What is playing, then the queue, numbered the way Winamp numbered a
 /// playlist. The queue's URIs come along for playing from a row.
 fn rows(app: &App, now: Option<&NowPlaying>) -> (Vec<Row>, Vec<String>) {
-    let queue = app.queue.get();
+    // Companion metadata is current, but Spotify's external queue is not
+    // exposed. Never present the preserved librespot queue as that queue.
+    let queue = if app.session_mode() {
+        None
+    } else {
+        app.queue.get()
+    };
     let ids = |item: &PlayableItem| match item {
         PlayableItem::Track(track) => (
             track.album.as_ref().map(|album| album.id.clone()),
@@ -772,7 +778,8 @@ fn list_menu(app: &mut App, ui: &mut egui::Ui, rows: &[Row], queue_uris: &[Strin
             },
         );
     });
-    let saveable = !queue_uris.is_empty() || rows.iter().any(|row| row.current);
+    let saveable =
+        !queue_uris.is_empty() || rows.iter().any(|row| row.current && !row.uri.is_empty());
     if ui
         .add_enabled(
             saveable,

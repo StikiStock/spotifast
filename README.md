@@ -130,6 +130,35 @@ The complete guide lives at **[spotifast.rocks](https://spotifast.rocks/)**.
 
 ## Contributing
 
+This checkout also contains an independent-fork playback experiment. The
+original librespot engine remains the default and still requires Premium.
+Windows users can select **Windows Spotify Session (experimental)** in Settings
+to control the running Spotify desktop app through native Windows APIs. See the
+[companion guide](docs/windows-companion.md) for capabilities and live tests, and
+the [feasibility report](docs/playback-feasibility.md)
+for the transport abstraction, mock tests, backend limitations and validation
+status. Independent, advertisement-free Free playback has not been demonstrated.
+
+For optional diagnostics, inspect media sessions with the isolated probe (Windows PowerShell
+5.1). It observes by default and never installs or modifies Spotify:
+
+```powershell
+powershell.exe -NoProfile -File examples/windows_session_probe.ps1
+powershell.exe -NoProfile -File examples/windows_session_probe.ps1 -SelfTest
+```
+
+With Spotify already playing, explicitly test commands from Windows PowerShell:
+
+```powershell
+./examples/windows_session_probe.ps1 -Commands Pause,Play,Next,Previous -WatchSeconds 10
+```
+
+Use `-MeasureSeconds 60` while both Spotify and a release build of Spotifast
+are running to sample their process memory and interval CPU. The native
+companion controls Spotify's engine and is not an independent playback engine.
+Normal use no longer requires the probe. Soloist integration is deferred until Linux mock
+WebSocket tests and user-provided-daemon validation.
+
 Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening an issue or pull
 request. To look at the interface without a Spotify account, run:
 

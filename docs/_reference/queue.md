@@ -18,6 +18,11 @@ playing from somewhere Spotify reports.
 These are the rules the app follows. The queue tests in `src/app.rs`
 check every one of them.
 
+The independent fork's experimental Windows Session companion cannot read or
+edit Spotify's external queue. Its queue view explains this, and queue changes
+are rejected before changing any rows. The original librespot queue and resume
+data are retained. The rules below still apply to librespot playback.
+
 Starting and resuming are separate actions. With Shuffle off, a playlist's
 **Play** button starts at its first available song in the selected order.
 Double-clicking a row starts there, including with Shuffle on. **Play** in

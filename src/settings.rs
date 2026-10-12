@@ -220,9 +220,37 @@ fn proxy_mode_is_system(mode: &ProxyMode) -> bool {
     *mode == ProxyMode::System
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlaybackProvider {
+    #[default]
+    Librespot,
+    WindowsSession,
+}
+
+impl PlaybackProvider {
+    pub fn is_session(self) -> bool {
+        cfg!(windows) && self == Self::WindowsSession
+    }
+}
+
+impl<'de> Deserialize<'de> for PlaybackProvider {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        Ok(if value.as_str() == Some("windows_session") {
+            Self::WindowsSession
+        } else {
+            Self::Librespot
+        })
+    }
+}
+
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
+    pub playback_provider: PlaybackProvider,
+    /// Opt in to live validation of Previous/Seek, which are not yet verified.
+    pub session_test_controls: bool,
     /// The Spotify Connect name other devices see.
     pub device_name: String,
     /// 96, 160, or 320 kbps.
@@ -416,6 +444,8 @@ impl std::fmt::Debug for Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            playback_provider: PlaybackProvider::default(),
+            session_test_controls: false,
             device_name: "Spotifast".to_string(),
             bitrate: 320,
             normalisation: false,
@@ -897,6 +927,28 @@ impl ManualProxy {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn playback_provider_defaults_and_round_trips_without_changing_audio_settings() {
+        let old: super::Settings =
+            serde_json::from_str(r#"{"audio_backend":"rodio","volume":32000}"#).unwrap();
+        assert_eq!(old.playback_provider, super::PlaybackProvider::Librespot);
+        assert!(!old.session_test_controls);
+        let mut session = old.clone();
+        session.playback_provider = super::PlaybackProvider::WindowsSession;
+        session.session_test_controls = true;
+        let restored: super::Settings =
+            serde_json::from_str(&serde_json::to_string(&session).unwrap()).unwrap();
+        assert_eq!(
+            restored.playback_provider,
+            super::PlaybackProvider::WindowsSession
+        );
+        assert_eq!(restored.audio_backend, old.audio_backend);
+        assert_eq!(restored.volume, old.volume);
+        assert!(!restored.playback_authorized);
+        let future: super::Settings =
+            serde_json::from_str(r#"{"playback_provider":"future_backend"}"#).unwrap();
+        assert_eq!(future.playback_provider, super::PlaybackProvider::Librespot);
+    }
     use super::Settings;
 
     #[test]

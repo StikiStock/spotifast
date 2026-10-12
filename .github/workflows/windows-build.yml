@@ -1,0 +1,87 @@
+name: Windows experimental build
+
+on:
+  push:
+    branches: [experimental-playback]
+  workflow_dispatch:
+
+# Source checkout only. No repository writes, Spotify grants or release access.
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-experimental-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_BUILD_TARGET: x86_64-pc-windows-msvc
+  RUSTUP_TOOLCHAIN: 1.98.0-x86_64-pc-windows-msvc
+
+jobs:
+  build:
+    name: Validate and build Windows executable (without MilkDrop)
+    # A manual dispatch on another branch does not build or upload anything.
+    if: github.ref == 'refs/heads/experimental-playback'
+    runs-on: windows-2022
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Check out the triggering commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      # Activate the C++ tools already installed on the hosted runner. This
+      # does not download Visual Studio, CMake, LLVM or vcpkg packages.
+      - name: Activate installed MSVC and Windows SDK
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+        with:
+          arch: x64
+
+      - name: Install the pinned Rust toolchain
+        run: |
+          $pin = Get-Content -Raw rust-toolchain.toml
+          if ($pin -notmatch '(?m)^channel\s*=\s*"1\.98\.0"\s*$') {
+            throw 'Update this workflow together with rust-toolchain.toml.'
+          }
+          rustup toolchain install $env:RUSTUP_TOOLCHAIN --profile minimal --component rustfmt --component clippy
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rustc --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Formatting
+        run: cargo fmt --all --check
+
+      - name: Check all targets without MilkDrop
+        run: cargo check --locked --no-default-features --all-targets
+
+      # Ordinary tests use fake grants. Ignored native-store/account tests are
+      # not enabled, and no Spotify secrets are passed to this job.
+      - name: Test all targets without MilkDrop
+        run: cargo test --locked --no-default-features --all-targets
+
+      - name: Deterministic UI tests without MilkDrop
+        run: cargo test --locked --no-default-features --features demo --all-targets
+
+      - name: Clippy without MilkDrop
+        run: cargo clippy --locked --no-default-features --all-targets -- -D warnings
+
+      - name: Build the release executable without MilkDrop
+        run: cargo build --locked --release --no-default-features --bin spotifast
+
+      # Upload only the release binary. Never archive the workspace, caches,
+      # debug symbols, app state, credential-store entries or runtime logs.
+      # Default success gating keeps failed validation from publishing a binary.
+      - name: Upload Windows executable
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: spotifast-windows-x64-no-milkdrop
+          path: target/x86_64-pc-windows-msvc/release/spotifast.exe
+          if-no-files-found: error
+          include-hidden-files: false
+          retention-days: 14

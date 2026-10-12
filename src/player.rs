@@ -44,6 +44,8 @@ use crate::vis::{AudioTap, Tapped};
 
 #[derive(Clone, Debug)]
 pub struct EngineConfig {
+    pub playback_provider: crate::settings::PlaybackProvider,
+    pub session_test_controls: bool,
     pub device_name: String,
     pub bitrate_kbps: u16,
     pub normalisation: bool,
@@ -279,6 +281,8 @@ impl LoadSpec {
 #[derive(Clone, Debug, PartialEq)]
 pub enum PlayerCommand {
     Toggle,
+    Pause,
+    Resume,
     Next,
     Previous,
     /// Remove manually queued tracks and keep context tracks.
@@ -469,6 +473,11 @@ impl Engine {
         &self.device_id
     }
 
+    /// A transport snapshot, without exposing the engine's mutable state.
+    pub fn current_state(&self) -> LocalState {
+        self.state.lock().unwrap_or_else(|p| p.into_inner()).clone()
+    }
+
     /// What this engine is heard at, kept past the engine itself: the next
     /// engine starts there.
     pub(crate) fn heard(&self) -> Heard {
@@ -605,6 +614,8 @@ impl Engine {
         let spirc = &self.spirc;
         match command {
             PlayerCommand::Toggle => spirc.play_pause()?,
+            PlayerCommand::Pause => spirc.pause()?,
+            PlayerCommand::Resume => spirc.play()?,
             PlayerCommand::Next => spirc.next()?,
             PlayerCommand::Previous => spirc.prev()?,
             PlayerCommand::ClearQueue => spirc.clear_queue()?,
@@ -1642,6 +1653,8 @@ mod tests {
     #[test]
     fn device_id_is_stable_hex() {
         let config = EngineConfig {
+            playback_provider: crate::settings::PlaybackProvider::Librespot,
+            session_test_controls: false,
             buffer_ms: crate::sink::DEFAULT_BUFFER_MS,
             tap: AudioTap::new(),
             eq: crate::eq::shared(),

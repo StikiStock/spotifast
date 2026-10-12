@@ -927,6 +927,9 @@ fn clutter_bar(app: &mut App, view: &mut View, now: Option<&NowPlaying>) {
 /// Only sound from this computer passes the tap; a device across the room
 /// leaves the bars flat. Returns whether anything is still moving.
 fn visualiser(app: &mut App, view: &mut View, now: Option<&NowPlaying>) -> bool {
+    if app.session_mode() {
+        return false;
+    }
     let area = layout::VISUALIZER;
     if view.interact(area, "visualiser", Sense::click()).clicked() {
         app.actions.push(Action::CycleVisualiser);

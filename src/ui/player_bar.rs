@@ -122,6 +122,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
 /// same post-equalizer, pre-volume sound as the mini player's visualizer,
 /// so the volume never moves it. Returns whether it is still moving.
 fn visualizer(app: &mut App, ui: &egui::Ui, rect: Rect, now: Option<&NowPlaying>) -> bool {
+    if app.session_mode() {
+        return false;
+    }
     use crate::settings::PlayerBarVis;
     use crate::vis;
     let mode = app.settings.player_bar_vis;
@@ -479,6 +482,14 @@ fn now_playing_block(app: &mut App, ui: &mut egui::Ui, region: Rect, now: Option
     text_ui.set_clip_rect(text_rect.intersect(ui.clip_rect()));
     text_ui.spacing_mut().item_spacing.y = 2.0;
     let title_response = theme::link(&mut text_ui, &now.title, theme::medium(14.0), palette.text);
+    let title_response = if app.session_mode() {
+        title_response.on_hover_text(format!(
+            "{}\n{}\n{}",
+            now.title, now.subtitle, now.album_name
+        ))
+    } else {
+        title_response
+    };
     if title_response.clicked() {
         if let Some(id) = &now.album_id {
             app.actions.push(Action::Open(Page::Album(id.clone())));
@@ -530,7 +541,7 @@ fn now_playing_block(app: &mut App, ui: &mut egui::Ui, region: Rect, now: Option
         }
     }
 
-    if !now.is_episode {
+    if !now.is_episode && !now.uri.is_empty() {
         let saved = app.is_saved(&now.uri).unwrap_or(false);
         // A liked heart stays green under the pointer, like shuffle.
         let (icon, color, hover, tooltip) = if saved {
@@ -617,6 +628,9 @@ fn transport(app: &mut App, ui: &mut egui::Ui, now: Option<&NowPlaying>, region:
 
     let shuffle_color = if shuffle { palette.accent } else { dim };
     let mut cell = centered(ui, slot(widths[0]));
+    if !app.supports_player_command(&crate::player::PlayerCommand::Shuffle(false)) {
+        cell.disable();
+    }
     let shuffle_button = theme::icon_button(
         &mut cell,
         Icon::Shuffle,
@@ -642,6 +656,9 @@ fn transport(app: &mut App, ui: &mut egui::Ui, now: Option<&NowPlaying>, region:
     }
 
     let mut cell = centered(ui, slot(widths[1]));
+    if !app.supports_player_command(&crate::player::PlayerCommand::Previous) {
+        cell.disable();
+    }
     if theme::icon_button(
         &mut cell,
         Icon::SkipBackFilled,
@@ -673,6 +690,9 @@ fn transport(app: &mut App, ui: &mut egui::Ui, now: Option<&NowPlaying>, region:
             palette.text
         };
         let mut cell = centered(ui, disc);
+        if !app.supports_player_command(&crate::player::PlayerCommand::Toggle) {
+            cell.disable();
+        }
         if theme::circle_button(
             &mut cell,
             icon,
@@ -693,6 +713,9 @@ fn transport(app: &mut App, ui: &mut egui::Ui, now: Option<&NowPlaying>, region:
     }
 
     let mut cell = centered(ui, slot(widths[3]));
+    if !app.supports_player_command(&crate::player::PlayerCommand::Next) {
+        cell.disable();
+    }
     if theme::icon_button(
         &mut cell,
         Icon::SkipForwardFilled,
@@ -720,6 +743,11 @@ fn transport(app: &mut App, ui: &mut egui::Ui, now: Option<&NowPlaying>, region:
         ),
     };
     let mut cell = centered(ui, slot(widths[4]));
+    if !app.supports_player_command(&crate::player::PlayerCommand::Repeat(
+        crate::player::RepeatMode::Off,
+    )) {
+        cell.disable();
+    }
     if theme::icon_button(
         &mut cell,
         repeat_icon,
@@ -768,6 +796,9 @@ fn transport(app: &mut App, ui: &mut egui::Ui, now: Option<&NowPlaying>, region:
             .max_rect(slider_rect)
             .layout(Layout::left_to_right(Align::Center)),
     );
+    if !app.supports_player_command(&crate::player::PlayerCommand::Seek(0)) {
+        slider_ui.disable();
+    }
     let fraction = if duration > 0 {
         position as f32 / duration as f32
     } else {
