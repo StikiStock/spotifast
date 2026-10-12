@@ -14,6 +14,15 @@ See the [Windows companion guide](../windows-companion.md) for unsupported URI,
 queue, volume and session-only catalogue capabilities. The librespot rules
 below remain unchanged when it is selected.
 
+The sign-in screen's **Continue with Windows Spotify Session** saves
+`session_without_sign_in: true` alongside the selected backend. In this mode,
+Spotify Web API and playback grants are not restored or verified at startup.
+Entering it invalidates in-flight credential leases and cancels pending sign-in,
+but does not revoke or delete stored grants. Only Windows session metadata and
+transport are used; the UI disables account features. Optional **Sign in with
+Spotify** enables the existing Web API flow separately. Selecting Librespot
+restores the normal stored-grant path and Premium audio requirements.
+
 Spotifast uses separate credentials for Web API access, a personal app, and
 local playback:
 

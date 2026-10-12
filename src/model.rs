@@ -1158,6 +1158,7 @@ pub enum Action {
     ToggleShowAllTop(String),
     Reload(Page),
     SignIn,
+    ContinueWindowsSession,
     CancelSignIn,
     SignOut,
     /// Add, replace, or remove the optional personal Web API app.

@@ -26,8 +26,11 @@ Spotifast is a Spotify client written in Rust with
 
 The interface includes complete Spanish, Turkish, and Ukrainian translations.
 
-**Playback needs Spotify Premium.** Free accounts can browse and search, but
-cannot play music through Spotifast.
+**Librespot playback needs Spotify Premium.** Browsing requires working Spotify
+Web API access. In this Windows fork, **Continue with Windows Spotify Session**
+on the sign-in screen opens the companion without any Spotifast sign-in. The
+installed, authenticated Spotify desktop app owns the audio. See the
+[companion guide](docs/windows-companion.md).
 
 ![Spotifast Home with the playlist library, recommendations, queue, and player visible](docs/screenshot.png)
 

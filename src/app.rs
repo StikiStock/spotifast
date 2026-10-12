@@ -1118,7 +1118,15 @@ impl App {
     }
 
     pub fn is_connected(&self) -> bool {
-        matches!(self.auth, AuthStatus::Connected { .. })
+        !self.companion_only() && matches!(self.auth, AuthStatus::Connected { .. })
+    }
+
+    pub fn companion_only(&self) -> bool {
+        self.session_mode() && self.settings.session_without_sign_in
+    }
+
+    pub fn web_features_available(&self) -> bool {
+        self.is_connected() && self.user.is_some()
     }
 
     pub fn user_id(&self) -> Option<&str> {
@@ -1272,6 +1280,9 @@ impl App {
 
     fn select_playback_provider(&mut self, provider: crate::settings::PlaybackProvider) {
         self.settings.playback_provider = provider;
+        if !provider.is_session() {
+            self.settings.session_without_sign_in = false;
+        }
         self.companion_generation = self.companion_generation.wrapping_add(1);
         self.companion_capabilities = crate::playback::Capabilities::default();
         self.companion_art = None;
@@ -1309,6 +1320,7 @@ impl App {
         }
         self.backend.send(Command::SetPlaybackProvider {
             provider,
+            without_sign_in: self.companion_only(),
             test_controls: self.settings.session_test_controls,
             generation: self.companion_generation,
         });
@@ -2065,6 +2077,9 @@ impl App {
                 }
                 Event::Local(state) => self.handle_local(*state),
                 Event::Api(response) => {
+                    if self.companion_only() {
+                        continue;
+                    }
                     if self.session_mode()
                         && matches!(
                             &*response,
@@ -2270,6 +2285,9 @@ impl App {
     }
 
     fn handle_auth(&mut self, status: AuthStatus) {
+        if self.companion_only() && !matches!(&status, AuthStatus::SignedOut) {
+            return;
+        }
         match &status {
             AuthStatus::Connected { .. } => {
                 self.sign_in_url = None;
@@ -2291,17 +2309,25 @@ impl App {
                 self.web_app = None;
                 self.user = None;
                 self.premium_notice_shown = false;
-                self.local = LocalState::default();
-                self.local_ready = false;
-                self.local_device_id = None;
-                self.local_playback = LocalPlayback::Unavailable;
+                if !self.session_mode() {
+                    self.local = LocalState::default();
+                    self.local_ready = false;
+                    self.local_device_id = None;
+                    self.local_playback = LocalPlayback::Unavailable;
+                }
                 self.remote = None;
                 self.rootlist.clear();
                 self.rootlist_cache = None;
                 self.editable_by_grant.clear();
                 self.account_caches_due = false;
                 self.session_dirty = true;
+                let companion_queue = self
+                    .session_mode()
+                    .then(|| std::mem::replace(&mut self.queue, Loadable::NotLoaded));
                 self.reset_data();
+                if let Some(queue) = companion_queue {
+                    self.queue = queue;
+                }
             }
             AuthStatus::Failed(message) => {
                 self.sign_in_url = None;
@@ -9135,6 +9161,30 @@ impl App {
     }
 
     pub(crate) fn apply(&mut self, action: Action, ctx: &egui::Context) {
+        if self.session_mode()
+            && !self.web_features_available()
+            && matches!(&action,
+                Action::Open(page) if !matches!(page, Page::Home | Page::Settings | Page::Queue))
+        {
+            self.toast_error("Library and catalogue pages need optional Spotify Web API sign-in. Playback controls work without it.");
+            return;
+        }
+        if self.session_mode()
+            && !self.web_features_available()
+            && matches!(
+                &action,
+                Action::FocusSearch
+                    | Action::Search(_)
+                    | Action::ToggleSaved(_)
+                    | Action::ConfigurePersonalWebApp
+                    | Action::OpenPersonalAppSetup
+                    | Action::ToggleLyricsPanel
+                    | Action::SetLyricsFullscreen(_)
+            )
+        {
+            self.toast_error("This feature needs optional Spotify Web API sign-in. Use Sign in with Spotify to enable browsing.");
+            return;
+        }
         if matches!(&action, Action::ToggleSaved(uri) if uri.is_empty()) {
             return;
         }
@@ -9870,7 +9920,22 @@ impl App {
                 }
             }
             Action::Reload(page) => self.reload(page),
-            Action::SignIn => self.request_proxy(true),
+            Action::ContinueWindowsSession => {
+                if cfg!(windows) {
+                    self.settings.session_without_sign_in = true;
+                    self.select_playback_provider(
+                        crate::settings::PlaybackProvider::WindowsSession,
+                    );
+                    self.handle_auth(AuthStatus::SignedOut);
+                    self.dialog = None;
+                    self.open(Page::Home);
+                }
+            }
+            Action::SignIn => {
+                self.settings.session_without_sign_in = false;
+                self.save_settings();
+                self.request_proxy(true);
+            }
             Action::ApplyProxy => self.request_proxy(false),
             Action::ProxyEdited => self.proxy_form_edited = true,
             Action::CancelSignIn => {
@@ -10961,7 +11026,8 @@ impl App {
             }
         }
         // Switch to the main window when sign-in is required.
-        let needs_sign_in = !(self.is_connected() && self.user.is_some())
+        let needs_sign_in = !self.session_mode()
+            && !(self.is_connected() && self.user.is_some())
             && !matches!(self.auth, AuthStatus::Connecting | AuthStatus::Starting)
             && !(self.is_connected() && self.user.is_none());
         if self.settings.winamp_window && needs_sign_in && !self.switch_intent {
@@ -11334,6 +11400,8 @@ pub fn engine_config(
     eq: crate::eq::SharedEq,
 ) -> EngineConfig {
     EngineConfig {
+        session_without_sign_in: settings.playback_provider.is_session()
+            && settings.session_without_sign_in,
         playback_provider: if settings.playback_provider.is_session() {
             settings.playback_provider
         } else {
@@ -11628,6 +11696,131 @@ mod radio;
 
 #[cfg(test)]
 mod tests {
+    #[cfg(windows)]
+    #[test]
+    fn signed_out_companion_entry_is_remembered_and_can_switch_back() {
+        let mut app = test_app("companion-entry");
+        app.backend.set_offline(true);
+        app.auth = AuthStatus::Failed("Shared Spotify sign-in failed: Forbidden".into());
+        let ctx = egui::Context::default();
+        app.apply(Action::ContinueWindowsSession, &ctx);
+        assert!(app.companion_only());
+        assert!(!app.is_connected());
+        assert!(app.user.is_none());
+        assert!(!app.local.connected);
+        assert!(app.sign_in_url.is_none());
+        let saved = Settings::load(&app.dirs.settings_file());
+        assert_eq!(
+            saved.playback_provider,
+            crate::settings::PlaybackProvider::WindowsSession
+        );
+        assert!(saved.session_without_sign_in);
+        let config = engine_config(
+            &app.dirs,
+            &saved,
+            crate::settings::ProxyConfig::Off,
+            crate::vis::AudioTap::new(),
+            crate::eq::shared(),
+        );
+        assert!(config.session_without_sign_in);
+        app.attach(&ctx);
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(900.0, 650.0),
+                )),
+                ..Default::default()
+            },
+            |ui| crate::ui::show(&mut app, ui),
+        );
+        output.textures_delta.clear();
+        assert!(!output.shapes.is_empty());
+        assert!(!app.local.connected);
+        app.apply(
+            Action::SetPlaybackProvider(crate::settings::PlaybackProvider::Librespot),
+            &ctx,
+        );
+        assert!(!app.session_mode());
+        assert!(!app.settings.session_without_sign_in);
+        app.backend.shutdown();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn signed_out_companion_displays_real_session_state_and_guards_browsing() {
+        let mut app = test_app("companion-signed-out");
+        app.backend.set_offline(true);
+        let ctx = egui::Context::default();
+        app.apply(Action::ContinueWindowsSession, &ctx);
+        let update = crate::playback::session::SessionUpdate {
+            state: LocalState {
+                connected: true,
+                playback: Playback::Playing,
+                track: Some(crate::player::LocalTrack {
+                    title: "External song".into(),
+                    album: "External album".into(),
+                    duration_ms: 60_000,
+                    ..Default::default()
+                }),
+                position_ms: 15_000,
+                ..LocalState::default()
+            },
+            capabilities: crate::playback::Capabilities::new([
+                crate::playback::CommandKind::Toggle,
+                crate::playback::CommandKind::Pause,
+                crate::playback::CommandKind::Resume,
+                crate::playback::CommandKind::Next,
+            ]),
+            artwork: None,
+        };
+        app.handle_backend_events(vec![Event::CompanionUpdate {
+            generation: app.companion_generation,
+            update: Box::new(update),
+        }]);
+        app.handle_auth(AuthStatus::SignedOut);
+        assert_eq!(app.now_playing().unwrap().title, "External song");
+        assert_eq!(app.now_playing().unwrap().position_ms, 15_000);
+        app.handle_backend_events(vec![Event::Api(Box::new(ApiResponse::Me(Ok(User {
+            id: "stale-web-account".into(),
+            ..User::default()
+        }))))]);
+        assert!(app.user.is_none());
+        app.apply(Action::FocusSearch, &ctx);
+        app.apply(Action::Open(Page::LikedSongs), &ctx);
+        assert_eq!(app.page(), &Page::Home);
+        app.apply(Action::TogglePlay, &ctx);
+        app.apply(Action::Next, &ctx);
+        app.apply(Action::Previous, &ctx);
+        app.apply(Action::Seek(20_000), &ctx);
+        assert_eq!(
+            app.backend.take_player_commands(),
+            [PlayerCommand::Pause, PlayerCommand::Next]
+        );
+        app.attach(&ctx);
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(900.0, 650.0),
+                )),
+                ..Default::default()
+            },
+            |ui| crate::ui::show(&mut app, ui),
+        );
+        output.textures_delta.clear();
+        assert!(!output.shapes.is_empty());
+        assert!(app.user.is_none());
+        app.apply(Action::SignIn, &ctx);
+        assert!(!app.companion_only());
+        assert!(app.session_mode());
+        app.handle_auth(AuthStatus::Failed(
+            "Shared Spotify sign-in failed: Forbidden".into(),
+        ));
+        assert_eq!(app.now_playing().unwrap().title, "External song");
+        app.backend.shutdown();
+    }
+
     #[cfg(windows)]
     #[test]
     fn companion_free_account_uses_transport_without_loading_or_mutating_queue() {

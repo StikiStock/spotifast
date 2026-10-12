@@ -565,10 +565,12 @@ mod tests {
 
     #[tokio::test]
     async fn notifications_reattach_after_restart_and_shutdown_clears_state() {
-        let present = Arc::new(Mutex::new(true));
+        let present = Arc::new(Mutex::new(false));
         let identity = Arc::new(Mutex::new(1));
         let notification = Arc::new(Mutex::new(None::<watch::Sender<()>>));
         let worker_notification = Arc::clone(&notification);
+        let observed = Arc::new(Mutex::new(false));
+        let worker_observed = Arc::clone(&observed);
         let host = MockHost {
             seen: Arc::default(),
             present: Arc::clone(&present),
@@ -580,10 +582,29 @@ mod tests {
                 *worker_notification.lock().unwrap() = Some(dirty);
                 Ok(host)
             },
-            Arc::new(|_| {}),
+            Arc::new(move |_| {
+                *worker_observed.lock().unwrap() = true;
+            }),
         )
         .unwrap();
         tokio::time::timeout(Duration::from_secs(2), async {
+            while !*observed.lock().unwrap() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            assert!(!backend.current_state().connected);
+            assert!(backend.current_state().track.is_none());
+            assert_eq!(
+                backend.execute(PlayerCommand::Pause),
+                Err(PlaybackError::Disconnected)
+            );
+            *present.lock().unwrap() = true;
+            notification
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .send(())
+                .unwrap();
             while !backend.current_state().connected {
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }

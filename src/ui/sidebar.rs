@@ -855,6 +855,40 @@ fn contents(app: &mut App, ui: &mut egui::Ui, grid_art: Option<Rect>) {
     let palette = app.palette;
     let page = app.page().clone();
     let locale = app.locale;
+    if app.session_mode() && !app.web_features_available() {
+        ui.add_enabled_ui(false, |ui| {
+            nav_row(ui, &palette, Icon::House, &gettext(locale, "Home"), false);
+            nav_row(
+                ui,
+                &palette,
+                Icon::Search,
+                &gettext(locale, "Search"),
+                false,
+            );
+            nav_row(
+                ui,
+                &palette,
+                Icon::Library,
+                &gettext(locale, "Library"),
+                false,
+            );
+        });
+        ui.add(
+            egui::Label::new("Library and playlists need optional Spotify Web API sign-in.").wrap(),
+        );
+        if nav_row(
+            ui,
+            &palette,
+            Icon::Settings,
+            &gettext(locale, "Settings"),
+            page == Page::Settings,
+        )
+        .clicked()
+        {
+            app.actions.push(Action::Open(Page::Settings));
+        }
+        return;
+    }
     ui.add_space(4.0);
     if nav_row(
         ui,

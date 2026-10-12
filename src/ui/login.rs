@@ -158,6 +158,13 @@ pub fn show(app: &mut App, ui: &mut egui::Ui, connecting: bool) {
                             }
                         }
                     }
+                    if cfg!(windows) {
+                        ui.add_space(12.0);
+                        if big_button(ui, app, "Continue with Windows Spotify Session") {
+                            app.actions.push(Action::ContinueWindowsSession);
+                        }
+                        ui.add(egui::Label::new("Use the running Spotify desktop app. No Spotifast sign-in or Premium subscription is required; browsing needs separate Web API access.").wrap());
+                    }
                     let mut proxy_open = ui.data(|data| data.get_temp::<bool>(proxy_id)).unwrap_or(false);
                     ui.add_space(4.0);
                     ui.horizontal(|ui| {
@@ -191,6 +198,66 @@ pub fn show(app: &mut App, ui: &mut egui::Ui, connecting: bool) {
                 palette.dim,
             );
         });
+}
+
+/// Signed-out content inside the existing application shell and player bar.
+pub fn companion(app: &mut App, ui: &mut egui::Ui) {
+    let palette = app.palette;
+    ui.add_space(20.0);
+    theme::text(
+        ui,
+        "Windows Spotify Session",
+        theme::bold(28.0),
+        palette.text,
+    );
+    let status = if app.local.connected {
+        "Connected to Spotify desktop. Choose tracks in Spotify and use the player controls below."
+    } else {
+        "Waiting for Spotify. Open the Spotify Windows app and play a song so it publishes a media session."
+    };
+    ui.add(egui::Label::new(status).wrap());
+    if let Some(error) = &app.local.error {
+        ui.add(egui::Label::new(egui::RichText::new(error).color(palette.danger)).wrap());
+    }
+    ui.add_space(12.0);
+    ui.add(egui::Label::new("Spotifast is not signed in. Library, search, playlists and other account features need optional Spotify Web API access. Spotify desktop remains responsible for audio and advertisements.").wrap());
+    ui.add_space(12.0);
+    match &app.auth {
+        AuthStatus::WaitingForBrowser { url } => {
+            let url = url.clone();
+            ui.label("Optional browsing sign-in is waiting for your browser.");
+            if ui.link("Open Spotify sign-in").clicked() {
+                ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+            }
+            if theme::pill_button(ui, &palette, "Cancel sign-in", false).clicked() {
+                app.actions.push(Action::ContinueWindowsSession);
+            }
+        }
+        AuthStatus::Connecting | AuthStatus::Starting if !app.companion_only() => {
+            ui.label("Checking optional Spotify Web API access...");
+            if theme::pill_button(ui, &palette, "Continue without sign-in", false).clicked() {
+                app.actions.push(Action::ContinueWindowsSession);
+            }
+        }
+        _ => {
+            if let AuthStatus::Failed(message) = &app.auth {
+                ui.add(egui::Label::new(message).wrap());
+            }
+            if theme::pill_button(
+                ui,
+                &palette,
+                "Sign in with Spotify (optional browsing)",
+                false,
+            )
+            .clicked()
+            {
+                app.actions.push(Action::SignIn);
+            }
+        }
+    }
+    if theme::pill_button(ui, &palette, "Settings", false).clicked() {
+        app.actions.push(Action::Open(crate::model::Page::Settings));
+    }
 }
 
 fn proxy_fields(ui: &mut egui::Ui, app: &mut App) {

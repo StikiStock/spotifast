@@ -285,6 +285,20 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     if section_matches(&needle, &account, &account_rows) {
         any_visible = true;
         section(ui, &palette, &account, |ui| {
+            if app.session_mode() && !app.web_features_available() {
+                ui.add(egui::Label::new("Not signed in to Spotifast. Windows session controls work independently. Sign in only to enable library, search and playlists.").wrap());
+                if theme::pill_button(
+                    ui,
+                    &palette,
+                    "Sign in with Spotify (optional browsing)",
+                    false,
+                )
+                .clicked()
+                {
+                    app.actions.push(Action::SignIn);
+                }
+                return;
+            }
             if row_matches(&needle, &format!("{sign_out} {account}"), "") {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 14.0;

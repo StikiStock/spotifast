@@ -45,6 +45,7 @@ use crate::vis::{AudioTap, Tapped};
 #[derive(Clone, Debug)]
 pub struct EngineConfig {
     pub playback_provider: crate::settings::PlaybackProvider,
+    pub session_without_sign_in: bool,
     pub session_test_controls: bool,
     pub device_name: String,
     pub bitrate_kbps: u16,
@@ -1653,6 +1654,7 @@ mod tests {
     #[test]
     fn device_id_is_stable_hex() {
         let config = EngineConfig {
+            session_without_sign_in: false,
             playback_provider: crate::settings::PlaybackProvider::Librespot,
             session_test_controls: false,
             buffer_ms: crate::sink::DEFAULT_BUFFER_MS,

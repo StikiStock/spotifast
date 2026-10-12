@@ -421,3 +421,53 @@ pause/resume/Next first, then opt in to Previous/Seek, restart/ambiguity behavio
 artwork and Free-account operation. Measure Spotifast plus all Spotify processes
 together. The companion always requires Spotify's official audio engine and
 does not establish advertisement-free or independent Free streaming.
+
+## Signed-out Windows companion entry
+
+The user reports that the native Windows executable subsequently compiled in
+Actions, but shared Web API sign-in failed. The profile-verification error path
+is documented in `docs/windows-companion.md`: OAuth supplies/restores a token,
+then `ApiClient::me()` sends GET `/v1/me`; an API status 403 is reported by
+`on_web_verification_failed`. The server-side reason remains unconfirmed.
+
+This follow-up adds **Continue with Windows Spotify Session** to the existing
+login card and allows the original player/settings shell while signed out.
+It persists `session_without_sign_in`, skips restoration/verification of
+Spotify grants on startup, cancels/invalidate in-flight Spotify work on entry
+without deleting protected grants, and gates account data/navigation behind
+separate optional Web API sign-in. Native metadata, artwork and transport retain
+the existing Windows actor. No new dependency, OAuth identity, audio engine or
+credential storage format was introduced. Librespot remains the default; older
+settings default the new preference to false and non-Windows configurations do
+not enable the companion-only path.
+
+New tests cover signed-out entry/persistence, UI rendering with no session or
+account, real-shaped mock metadata/control routing, optional sign-in failure,
+switching back, forbidden profile verification, and skipping grant restoration
+while rejecting late Web results. The actor's existing restart/shutdown test now
+starts with an absent session before its first notification-driven attachment.
+The existing Windows workflow already runs these tests and deterministic demo
+coverage; it requires no additional dependency or job.
+
+Validation on this host:
+
+- Rust 1.98 formatting and `git diff --check`: passed.
+- Rebuilt isolated mock/actor/relay harness: **13 passed**, including initial
+  absence, appearance, disappearance, restart and shutdown. The production mock
+  and native driver are included directly; data types/contract/relay and actor
+  constructor gate are extracted as documented above.
+- Isolated actor/native-driver MSVC-target Clippy, all targets, `-D warnings`:
+  passed. This excludes application/worker/authentication dependencies.
+- Full `cargo check --locked --no-default-features --all-targets`: exit 101 in
+  dependency build scripts because local `link.exe` is missing. Full application
+  tests, Clippy and release build are pending the new approved Actions run.
+- New authentication and egui tests have not run locally. No live native playback
+  or memory/CPU measurement was obtained; no Visual Studio tooling was installed.
+
+Files changed: `README.md`, `docs/_reference/how-it-connects.md`,
+`docs/windows-companion.md`, `docs/windows-remote-build.md`, this report,
+`src/app.rs`, `src/backend.rs`, `src/model.rs`, `src/player.rs`,
+`src/settings.rs`, `src/playback/session.rs`, `src/ui/login.rs`,
+`src/ui/mod.rs`, `src/ui/settings.rs`, `src/ui/sidebar.rs`, `src/ui/topbar.rs`.
+Cargo manifests, lockfile, Windows native driver and artifact workflow are
+unchanged. Nothing was committed or pushed by the agent.

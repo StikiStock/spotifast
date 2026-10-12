@@ -41,7 +41,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let signed_in = app.is_connected() && app.user.is_some();
     let connecting = matches!(app.auth, AuthStatus::Connecting | AuthStatus::Starting)
         || (app.is_connected() && app.user.is_none());
-    if !signed_in {
+    if !signed_in && !app.session_mode() {
         player_bar::end_tint_session(ctx);
         login::show(app, ui, connecting);
         update::show(app, ctx);
@@ -296,6 +296,13 @@ fn central(app: &mut App, ui: &mut egui::Ui) {
                         })
                         .show(ui, |ui| {
                             ui.set_min_width(ui.available_width());
+                            if app.session_mode()
+                                && !app.web_features_available()
+                                && page != Page::Settings
+                            {
+                                login::companion(app, ui);
+                                return;
+                            }
                             match page {
                                 Page::Home => home::show(app, ui),
                                 Page::TopSongs => collection::top_songs(app, ui),

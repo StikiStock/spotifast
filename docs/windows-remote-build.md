@@ -39,33 +39,23 @@ git remote -v
 
 Confirm the branch is `experimental-playback` and the `fork` push URL is your
 repository. Review the untracked `src/playback/`, probe and report as well.
-The user reports that the previous workflow completed successfully. These new
-native companion changes need another run. The settings, worker, player and UI
-changes depend on one another, so stage them together as one feature, then
-stage the audit/probe and CI documentation separately:
+The user reports that the previous native Windows executable compiled
+successfully. The companion-only sign-in changes need another run. After
+reviewing these changes, commit them together because the settings, worker and
+UI entry path depend on each other:
 
 ```powershell
-git add Cargo.toml Cargo.lock README.md src/app.rs src/backend.rs src/lib.rs src/model.rs src/player.rs src/settings.rs src/playback/ src/ui/player_bar.rs src/ui/queue.rs src/ui/settings.rs src/ui/winamp/mod.rs src/ui/winamp/playlist.rs docs/windows-companion.md docs/_reference/how-it-connects.md docs/_reference/queue.md
+git add README.md docs/_reference/how-it-connects.md docs/windows-companion.md docs/windows-remote-build.md docs/playback-feasibility.md src/app.rs src/backend.rs src/model.rs src/player.rs src/settings.rs src/playback/session.rs src/ui/login.rs src/ui/mod.rs src/ui/settings.rs src/ui/sidebar.rs src/ui/topbar.rs
 git diff --cached
-git commit -m "Add an experimental native Windows Spotify companion"
-
-git add docs/playback-feasibility.md examples/windows_session_probe.ps1
-git diff --cached
-git commit -m "Document playback feasibility and add a Windows session probe"
-
-git add .github/workflows/windows-build.yml docs/windows-remote-build.md
-git diff --cached
-git commit -m "Validate experimental Windows builds in GitHub Actions"
-
-git push --set-upstream fork experimental-playback
+git commit -m "Allow Windows companion use without Spotifast sign-in"
+git push fork experimental-playback
 ```
 
-This is a validation branch. The new native implementation has not been built
-by Actions yet. These commits are not evidence of a successful full application
-build. Subsequent
-compilation fixes should also stay focused and be pushed normally, without
-rewriting published history. The local `target/` and `.cache/` directories are
-ignored and are not among the paths staged above.
+The checkout already has `fork` pointing to `StikiStock/spotifast`; `origin`
+continues to point to upstream. The push triggers the Windows workflow. These
+new application/authentication tests are not validated until that run succeeds.
+The local `target/` and `.cache/` directories remain ignored and are not staged.
+No agent commit or push has been made.
 
 ## Run and download
 

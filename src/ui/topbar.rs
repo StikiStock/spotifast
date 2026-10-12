@@ -336,15 +336,20 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             let selected = egui::TextEdit::load_state(ui.ctx(), id)
                 .and_then(|state| state.cursor.char_range())
                 .is_some_and(|range| !range.is_empty());
-            let response = super::widgets::search_field(
-                ui,
-                &palette,
-                app.locale,
-                id,
-                &mut app.search.query,
-                &gettext(locale, "What do you want to play?"),
-                search_width,
-            );
+            let response = ui
+                .add_enabled_ui(!app.session_mode() || app.web_features_available(), |ui| {
+                    super::widgets::search_field(
+                        ui,
+                        &palette,
+                        app.locale,
+                        id,
+                        &mut app.search.query,
+                        &gettext(locale, "What do you want to play?"),
+                        search_width,
+                    )
+                })
+                .inner
+                .on_disabled_hover_text("Search needs optional Spotify Web API sign-in.");
             if app.search.focus_requested {
                 app.search.focus_requested = false;
                 response.request_focus();
@@ -381,13 +386,14 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 let (name, avatar) = app
                     .user
                     .as_ref()
+                    .filter(|_| app.web_features_available())
                     .map(|user| {
                         (
                             user.name().to_string(),
                             pick_image(&user.images, 64).map(str::to_string),
                         )
                     })
-                    .unwrap_or_default();
+                    .unwrap_or_else(|| ("Not signed in".to_string(), None));
                 let (rect, response) =
                     ui.allocate_exact_size(Vec2::splat(AVATAR_SIZE), Sense::click());
                 if ui.is_rect_visible(rect) {
@@ -474,9 +480,20 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                             ui,
                             &palette,
                             Some(Icon::LogOut),
-                            &gettext(locale, "Sign out"),
+                            &gettext(
+                                locale,
+                                if app.web_features_available() {
+                                    "Sign out"
+                                } else {
+                                    "Sign in with Spotify"
+                                },
+                            ),
                         ) {
-                            app.actions.push(Action::SignOut);
+                            app.actions.push(if app.web_features_available() {
+                                Action::SignOut
+                            } else {
+                                Action::SignIn
+                            });
                         }
                     });
                 if !app.network_reachable {

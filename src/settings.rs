@@ -249,6 +249,8 @@ impl<'de> Deserialize<'de> for PlaybackProvider {
 #[serde(default)]
 pub struct Settings {
     pub playback_provider: PlaybackProvider,
+    /// Remember the Windows companion entry without restoring Spotify grants.
+    pub session_without_sign_in: bool,
     /// Opt in to live validation of Previous/Seek, which are not yet verified.
     pub session_test_controls: bool,
     /// The Spotify Connect name other devices see.
@@ -445,6 +447,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             playback_provider: PlaybackProvider::default(),
+            session_without_sign_in: false,
             session_test_controls: false,
             device_name: "Spotifast".to_string(),
             bitrate: 320,
@@ -933,9 +936,11 @@ mod tests {
             serde_json::from_str(r#"{"audio_backend":"rodio","volume":32000}"#).unwrap();
         assert_eq!(old.playback_provider, super::PlaybackProvider::Librespot);
         assert!(!old.session_test_controls);
+        assert!(!old.session_without_sign_in);
         let mut session = old.clone();
         session.playback_provider = super::PlaybackProvider::WindowsSession;
         session.session_test_controls = true;
+        session.session_without_sign_in = true;
         let restored: super::Settings =
             serde_json::from_str(&serde_json::to_string(&session).unwrap()).unwrap();
         assert_eq!(
@@ -943,6 +948,7 @@ mod tests {
             super::PlaybackProvider::WindowsSession
         );
         assert_eq!(restored.audio_backend, old.audio_backend);
+        assert!(restored.session_without_sign_in);
         assert_eq!(restored.volume, old.volume);
         assert!(!restored.playback_authorized);
         let future: super::Settings =

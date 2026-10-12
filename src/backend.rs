@@ -580,6 +580,7 @@ struct PlaylistCacheWrite {
 pub enum Command {
     SetPlaybackProvider {
         provider: crate::settings::PlaybackProvider,
+        without_sign_in: bool,
         test_controls: bool,
         generation: u64,
     },
@@ -1853,9 +1854,12 @@ impl Worker {
             match command {
                 Command::SetPlaybackProvider {
                     provider,
+                    without_sign_in,
                     test_controls,
                     generation,
                 } => {
+                    let restore_after_companion =
+                        self.engine_config.session_without_sign_in && !without_sign_in;
                     self.stop_companion();
                     if self.engine_busy
                         && let Some(cancel) = self.cancel_signin.take()
@@ -1867,11 +1871,19 @@ impl Worker {
                     self.engine_busy = false;
                     self.engine_restart_pending = false;
                     self.engine_config.playback_provider = provider;
+                    self.engine_config.session_without_sign_in =
+                        provider.is_session() && without_sign_in;
+                    if self.engine_config.session_without_sign_in {
+                        self.suspend_spotify_access();
+                    }
                     self.engine_config.session_test_controls = test_controls;
                     self.companion_generation = generation;
                     if provider.is_session() {
                         self.start_companion();
                     } else {
+                        if restore_after_companion {
+                            self.restore_spotify_grants();
+                        }
                         self.resume_engine();
                     }
                 }
@@ -1971,7 +1983,10 @@ impl Worker {
                     });
                 }
                 Command::Shutdown => break,
-                Command::SignIn { request, config } => self.change_proxy(request, config, true),
+                Command::SignIn { request, config } => {
+                    self.engine_config.session_without_sign_in = false;
+                    self.change_proxy(request, config, true);
+                }
                 Command::CancelSignIn => {
                     self.authorization_attempt += 1;
                     if let Some(cancel) = self.cancel_signin.take() {
@@ -2009,6 +2024,7 @@ impl Worker {
                     // acknowledgement was still in flight when this was clicked.
                     config.proxy = self.engine_config.proxy.clone();
                     config.playback_provider = self.engine_config.playback_provider;
+                    config.session_without_sign_in = self.engine_config.session_without_sign_in;
                     config.session_test_controls = self.engine_config.session_test_controls;
                     self.engine_config = config;
                     self.replace_engine();
@@ -2042,9 +2058,15 @@ impl Worker {
                         )),
                     }
                 }
-                Command::Api(ApiRequest::Search { query, serial }) => self.search(query, serial),
+                Command::Api(ApiRequest::Search { query, serial }) => {
+                    if !self.engine_config.session_without_sign_in {
+                        self.search(query, serial);
+                    }
+                }
                 Command::Api(request) => {
-                    self.dispatch(request);
+                    if !self.engine_config.session_without_sign_in {
+                        self.dispatch(request);
+                    }
                 }
                 Command::ApiFinished {
                     generation,
@@ -2469,6 +2491,10 @@ impl Worker {
     }
 
     fn restore_spotify_grants(&mut self) {
+        if self.engine_config.session_without_sign_in {
+            self.emit(Event::Auth(AuthStatus::SignedOut));
+            return;
+        }
         if std::mem::replace(&mut self.spotify_restore_started, true) {
             return;
         }
@@ -2499,6 +2525,9 @@ impl Worker {
         lease: CredentialLease,
         result: Result<crate::credentials::Loaded, crate::credentials::Error>,
     ) {
+        if self.engine_config.session_without_sign_in {
+            return;
+        }
         if slot == CredentialSlot::Proxy {
             return;
         }
@@ -2583,6 +2612,9 @@ impl Worker {
     }
 
     fn on_web_signed_in(&mut self, source: ApiSource, token: crate::auth::StoredToken) {
+        if self.engine_config.session_without_sign_in {
+            return;
+        }
         let lease = self.credentials.lease(web_slot(source));
         let tokens = WebTokens::new(
             self.http.clone(),
@@ -2653,6 +2685,9 @@ impl Worker {
     }
 
     fn on_web_verification_failed(&mut self, source: ApiSource, error: ApiError) {
+        if self.engine_config.session_without_sign_in {
+            return;
+        }
         if matches!(error, ApiError::SignInExpired { .. }) {
             // A rejected refresh grant cannot restore a session next time.
             // Forget only this grant and ask for a fresh browser approval.
@@ -2679,6 +2714,9 @@ impl Worker {
     }
 
     fn on_web_verified(&mut self, source: ApiSource, token: crate::auth::StoredToken, user: User) {
+        if self.engine_config.session_without_sign_in {
+            return;
+        }
         if !matches!(self.api.state(source), SessionState::Authorizing)
             || source == ApiSource::Personal
                 && self.web_client_id.as_deref() != Some(token.client_id.as_str())
@@ -2758,6 +2796,9 @@ impl Worker {
     }
 
     fn sign_in_source(&mut self, source: ApiSource) {
+        if self.engine_config.session_without_sign_in {
+            return;
+        }
         let http = match self.http.client() {
             Ok(http) => http,
             Err(error) => {
@@ -2891,6 +2932,39 @@ impl Worker {
                 notice(error);
             }
         });
+    }
+
+    /// Stop in-flight Spotify work without revoking or deleting stored grants.
+    /// The user can still explicitly sign in, or restore them with Librespot.
+    fn suspend_spotify_access(&mut self) {
+        self.cancel_search();
+        for slot in CredentialSlot::SPOTIFY {
+            self.credentials.invalidate(slot);
+        }
+        if let Some(cancel) = self.cancel_signin.take() {
+            let _ = cancel.send(true);
+        }
+        self.authorization_attempt = self.authorization_attempt.wrapping_add(1);
+        self.authorizing_source = None;
+        self.pending_authorization = None;
+        self.spotify_restore_started = false;
+        self.restore_pending = [false; 3];
+        self.signed_in = false;
+        self.rootlist_pending = false;
+        self.session.send_modify(|generation| *generation += 1);
+        self.connect = Arc::default();
+        self.web_tokens = [None, None];
+        self.playback_grant = None;
+        self.pending_playback_grant = None;
+        self.premium = None;
+        self.resume_verify = None;
+        self.waiting_for_network = false;
+        self.album_type_lookup.reset_session();
+        self.audiobook_lookup.clear();
+        self.playlist_header_lookup.clear_engine_work();
+        self.radio_waiting.clear();
+        self.api.clear_all();
+        self.emit(Event::Auth(AuthStatus::SignedOut));
     }
 
     fn sign_out(&mut self) {
@@ -6498,6 +6572,59 @@ mod authorization_tests {
         assert!(worker.pending_playback_grant.is_none());
         assert!(worker.reconnects.is_empty());
         assert!(events.try_iter().next().is_none());
+    }
+
+    #[test]
+    fn companion_entry_skips_restoration_and_invalidates_late_web_work() {
+        let (runtime, mut worker, events) = worker("companion-no-web");
+        let _entered = runtime.enter();
+        let lease = worker.credentials.lease(CredentialSlot::Shared);
+        worker
+            .api
+            .set_state(ApiSource::Shared, SessionState::Authorizing);
+        worker.engine_config.session_without_sign_in = true;
+        worker.suspend_spotify_access();
+        assert!(!lease.current());
+        assert!(matches!(
+            events.try_recv(),
+            Ok(Event::Auth(AuthStatus::SignedOut))
+        ));
+        worker.restore_spotify_grants();
+        assert!(!worker.spotify_restore_started);
+        assert_eq!(worker.restore_pending, [false; 3]);
+        assert!(worker.web_tokens.iter().all(Option::is_none));
+        assert!(worker.playback_grant.is_none());
+        assert!(worker.api.account().is_none());
+        assert!(matches!(
+            events.try_recv(),
+            Ok(Event::Auth(AuthStatus::SignedOut))
+        ));
+        worker.sign_in_source(ApiSource::Shared);
+        worker.on_web_signed_in(ApiSource::Shared, crate::auth::StoredToken::default());
+        worker.on_web_verification_failed(
+            ApiSource::Shared,
+            ApiError::Status {
+                status: 403,
+                message: "Forbidden".into(),
+            },
+        );
+        assert!(worker.cancel_signin.is_none());
+        assert!(worker.authorizing_source.is_none());
+        assert!(events.try_iter().next().is_none());
+    }
+
+    #[test]
+    fn forbidden_shared_profile_verification_is_not_an_oauth_callback_error() {
+        let (_runtime, mut worker, events) = worker("shared-profile-forbidden");
+        worker.on_web_verification_failed(
+            ApiSource::Shared,
+            ApiError::Status {
+                status: 403,
+                message: "Forbidden".into(),
+            },
+        );
+        assert!(events.try_iter().any(|event| matches!(event,
+            Event::Auth(AuthStatus::Failed(message)) if message == "Shared Spotify sign-in failed: Forbidden")));
     }
 
     #[test]
