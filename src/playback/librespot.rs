@@ -89,40 +89,6 @@ impl LibrespotBackend {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn engine_errors_are_not_repeated_on_every_position_update_and_shutdown_is_reported_once() {
-        let (events, mut receive) = broadcast::channel(EVENT_CAPACITY);
-        let relay = EventRelay {
-            events,
-            state: Mutex::default(),
-        };
-        let mut state = LocalState {
-            connected: true,
-            ..LocalState::default()
-        };
-        relay.publish(&EngineEvent::State(state.clone()));
-        assert!(matches!(receive.try_recv(), Ok(PlaybackEvent::State(_))));
-        state.error = Some("Spotify refused the audio key. Try again later".into());
-        relay.publish(&EngineEvent::State(state.clone()));
-        assert!(matches!(receive.try_recv(), Ok(PlaybackEvent::State(_))));
-        assert!(matches!(receive.try_recv(), Ok(PlaybackEvent::Error(_))));
-        state.position_ms = 1_000;
-        relay.publish(&EngineEvent::State(state.clone()));
-        assert!(matches!(receive.try_recv(), Ok(PlaybackEvent::State(_))));
-        assert!(receive.try_recv().is_err());
-        state.connected = false;
-        relay.publish(&EngineEvent::State(state));
-        relay.publish(&EngineEvent::SessionEnded);
-        assert!(matches!(receive.try_recv(), Ok(PlaybackEvent::State(_))));
-        assert_eq!(receive.try_recv().unwrap(), PlaybackEvent::Disconnected);
-        assert!(receive.try_recv().is_err());
-    }
-}
-
 // The worker also performs librespot-specific catalogue reads and recovery.
 // Preserve those APIs without forcing unrelated providers to expose a Session.
 // Transport dispatch in the worker uses PlaybackBackend::execute explicitly.
@@ -165,5 +131,39 @@ impl PlaybackBackend for LibrespotBackend {
 
     fn disconnect(&self) {
         self.engine.shutdown();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn engine_errors_are_not_repeated_on_every_position_update_and_shutdown_is_reported_once() {
+        let (events, mut receive) = broadcast::channel(EVENT_CAPACITY);
+        let relay = EventRelay {
+            events,
+            state: Mutex::default(),
+        };
+        let mut state = LocalState {
+            connected: true,
+            ..LocalState::default()
+        };
+        relay.publish(&EngineEvent::State(state.clone()));
+        assert!(matches!(receive.try_recv(), Ok(PlaybackEvent::State(_))));
+        state.error = Some("Spotify refused the audio key. Try again later".into());
+        relay.publish(&EngineEvent::State(state.clone()));
+        assert!(matches!(receive.try_recv(), Ok(PlaybackEvent::State(_))));
+        assert!(matches!(receive.try_recv(), Ok(PlaybackEvent::Error(_))));
+        state.position_ms = 1_000;
+        relay.publish(&EngineEvent::State(state.clone()));
+        assert!(matches!(receive.try_recv(), Ok(PlaybackEvent::State(_))));
+        assert!(receive.try_recv().is_err());
+        state.connected = false;
+        relay.publish(&EngineEvent::State(state));
+        relay.publish(&EngineEvent::SessionEnded);
+        assert!(matches!(receive.try_recv(), Ok(PlaybackEvent::State(_))));
+        assert_eq!(receive.try_recv().unwrap(), PlaybackEvent::Disconnected);
+        assert!(receive.try_recv().is_err());
     }
 }
