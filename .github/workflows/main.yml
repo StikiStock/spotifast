@@ -1,0 +1,27 @@
+cd C:\my-workspace\spotifast
+
+# Confirm you're on the correct branch
+git branch --show-current
+
+# Check what changed
+git status --short
+
+# Add the project changes
+git add src/backend.rs src/lib.rs src/player.rs src/playback/
+git add README.md docs/playback-feasibility.md
+git add docs/windows-remote-build.md
+git add examples/windows_session_probe.ps1
+git add .github/workflows/windows-build.yml
+
+# Review staged changes
+git diff --cached --stat
+git diff --cached --check
+
+# Commit
+git commit -m "Add experimental playback backends and Windows CI"
+
+# Connect your fork
+git remote add fork https://github.com/StikiStock/spotifast.git
+
+# Upload your branch
+git push -u fork experimental-playback
