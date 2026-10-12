@@ -7617,8 +7617,7 @@ impl App {
     fn play_request(&mut self, request: PlayRequest, shuffle_first: bool) {
         if self.session_mode() {
             self.toast_error(
-                "Choose tracks in Spotify. Windows Session controls the existing playback only."
-                    .into(),
+                "Choose tracks in Spotify. Windows Session controls the existing playback only.",
             );
             return;
         }
@@ -9150,7 +9149,7 @@ impl App {
             };
             if let Some(command) = command {
                 if !self.supports_player_command(&command) {
-                    self.toast_error("This control is unavailable for the Spotify session. Previous and Seek require the test opt-in in Settings.".into());
+                    self.toast_error("This control is unavailable for the Spotify session. Previous and Seek require the test opt-in in Settings.");
                     return;
                 }
                 match &action {
@@ -9190,7 +9189,7 @@ impl App {
                     | Action::SetRepeat(_)
                     | Action::ToggleWinampMilkdrop
             ) {
-                self.toast_error("Choose songs and adjust the queue, volume or playback mode in Spotify. This companion controls transport only.".into());
+                self.toast_error("Choose songs and adjust the queue, volume or playback mode in Spotify. This companion controls transport only.");
                 return;
             }
         }
